@@ -24,7 +24,7 @@
           <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="{{ url_for('pasien_detail', pasien_id=p.id) }}">Buka</a></td>
         </tr>
       {% else %}
-        <tr><td colspan="7" class="text-center text-muted py-4">Belum ada pasien. <a href="{{ url_for('pasien_baru') }}">Tambah pasien</a></td></tr>
+        <tr><td colspan="7" class="text-center text-muted py-4">{% if is_admin() %}Belum ada pasien. <a href="{{ url_for('pasien_baru') }}">Tambah pasien</a>{% else %}Belum ada pasien yang ditugaskan kepada Anda.{% endif %}</td></tr>
       {% endfor %}
       </tbody>
     </table>

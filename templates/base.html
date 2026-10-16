@@ -24,11 +24,12 @@
         <li class="nav-item"><a class="nav-link {% if request.endpoint and request.endpoint.startswith('pasien') %}active{% endif %}" href="{{ url_for('pasien_list') }}">Pasien</a></li>
       {% endif %}</ul>
       {% if g.user %}
-      <a class="btn btn-light btn-sm me-2" href="{{ url_for('pasien_baru') }}"><i class="bi bi-person-plus"></i> Pasien Baru</a>
+      {% if is_admin() %}<a class="btn btn-light btn-sm me-2" href="{{ url_for('pasien_baru') }}"><i class="bi bi-person-plus"></i> Pasien Baru</a>{% endif %}
       <div class="dropdown">
         <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown"><i class="bi bi-person-circle"></i> {{ g.user.nama or g.user.username }}</button>
         <ul class="dropdown-menu dropdown-menu-end">
-          <li><a class="dropdown-item" href="{{ url_for('pengguna') }}"><i class="bi bi-people"></i> Kelola Pengguna</a></li>
+          <li><span class="dropdown-item-text small text-muted">Role: {{ ROLE[g.user.role] }}</span></li>
+          {% if is_admin() %}<li><a class="dropdown-item" href="{{ url_for('pengguna') }}"><i class="bi bi-people"></i> Kelola Pengguna</a></li>{% endif %}
           <li><a class="dropdown-item" href="{{ url_for('ganti_password') }}"><i class="bi bi-key"></i> Ganti Password</a></li>
           <li><hr class="dropdown-divider"></li>
           <li><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="dropdown-item text-danger"><i class="bi bi-box-arrow-right"></i> Keluar</button></form></li>

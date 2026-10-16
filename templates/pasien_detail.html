@@ -12,12 +12,13 @@
         Umur: {{ pasien.tanggal_lahir|umur }} tahun
       </div>
       {% if pasien.catatan %}<div class="mt-2"><i class="bi bi-info-circle"></i> {{ pasien.catatan }}</div>{% endif %}
+      <div class="mt-2 small text-muted"><i class="bi bi-person-badge"></i> Petugas: {% for u in petugas %}{{ u.nama or u.username }}{% if not loop.last %}, {% endif %}{% else %}belum ditugaskan{% endfor %}</div>
     </div>
     <div class="d-flex gap-2 align-items-start">
       <a class="btn btn-outline-primary btn-sm" href="{{ url_for('pasien_edit', pasien_id=pasien.id) }}"><i class="bi bi-pencil"></i> Edit</a>
-      <form method="post" action="{{ url_for('pasien_hapus', pasien_id=pasien.id) }}" onsubmit="return confirm('Hapus pasien beserta seluruh datanya?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% if is_admin() %}<form method="post" action="{{ url_for('pasien_hapus', pasien_id=pasien.id) }}" onsubmit="return confirm('Hapus pasien beserta seluruh datanya?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-outline-danger btn-sm"><i class="bi bi-trash"></i> Hapus</button>
-      </form>
+      </form>{% endif %}
     </div>
   </div>
 </div>
