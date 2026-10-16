@@ -16,6 +16,19 @@
           </select>
         </div>
         <div class="col-12"><label class="form-label">Catatan (diagnosis, alergi, dll.)</label><textarea class="form-control" name="catatan" rows="3">{{ pasien.catatan or '' }}</textarea></div>
+        {% if is_admin() %}
+        <div class="col-12"><label class="form-label">Petugas yang ditugaskan</label>
+          {% for u in petugas %}
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" name="petugas" value="{{ u.id }}" id="petugas-{{ u.id }}" {% if u.id in ditugaskan %}checked{% endif %}>
+              <label class="form-check-label" for="petugas-{{ u.id }}">{{ u.nama or u.username }} <span class="text-muted">({{ u.username }})</span></label>
+            </div>
+          {% else %}
+            <div class="form-text">Belum ada pengguna dengan role Petugas. Tambahkan lewat Kelola Pengguna.</div>
+          {% endfor %}
+          <div class="form-text">Petugas hanya bisa melihat dan mengelola pasien yang ditugaskan kepadanya. Admin selalu bisa mengakses semua pasien.</div>
+        </div>
+        {% endif %}
       </div>
       <div class="mt-4 d-flex gap-2">
         <button class="btn btn-primary">Simpan</button>
