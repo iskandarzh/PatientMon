@@ -227,3 +227,45 @@ def test_migrasi_pengguna_lama_jadi_admin(tmp_path):
     # new users created afterwards default to petugas
     c.post("/pengguna", data={"username": "baru", "password": "rahasia123", "konfirmasi": "rahasia123"})
     assert _login(app, "baru", "rahasia123").get("/pasien/1").status_code == 404
+
+
+def test_export_pengukuran(client, app):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    client.post("/pengguna", data={"username": "siti", "role": "petugas", "password": "petugas123", "konfirmasi": "petugas123"})
+    client.post("/pasien/baru", data={"nama": "Budi", "no_rm": "RM1", "petugas": ["2"]})
+    client.post("/pasien/baru", data={"nama": "Wati"})
+    client.post("/pasien/1/pengukuran/baru", data={"waktu": "2026-10-05T08:00", "sistolik": "150", "diastolik": "95",
+                                                   "gula_darah": "130", "jenis_gula": "puasa", "catatan": "=1+1"})
+    client.post("/pasien/1/pengukuran/baru", data={"waktu": "2026-10-07T08:00", "sistolik": "118", "diastolik": "76"})
+    client.post("/pasien/2/pengukuran/baru", data={"waktu": "2026-10-05T09:00", "gula_darah": "90"})
+
+    r = client.get("/export/pengukuran?format=xlsx")
+    assert r.status_code == 200 and r.headers["Content-Disposition"].endswith(".xlsx")
+    ws = load_workbook(BytesIO(r.data)).active
+    rows = [row for row in ws.iter_rows(min_row=5, values_only=True)]
+    assert [row[2] for row in rows] == ["Budi", "Budi", "Wati"]
+    assert rows[0][3:7] == (150, 95, None, "Hipertensi Tahap 2")
+    assert rows[0][9] == "Diabetes" and rows[0][10] == "=1+1"
+    assert ws.cell(row=5, column=11).data_type == "s"
+
+    r = client.get("/export/pengukuran?format=xlsx&pasien_id=1&dari=2026-10-06&sampai=2026-10-31")
+    rows = list(load_workbook(BytesIO(r.data)).active.iter_rows(min_row=5, values_only=True))
+    assert len(rows) == 1 and rows[0][0] == "2026-10-07 08:00"
+    assert "pengukuran_Budi_" in r.headers["Content-Disposition"]
+
+    r = client.get("/export/pengukuran?format=pdf&pasien_id=1")
+    assert r.status_code == 200 and r.mimetype == "application/pdf" and r.data.startswith(b"%PDF")
+    assert client.get("/export/pengukuran?format=csv").status_code == 400
+    r = client.get("/export/pengukuran?format=pdf&dari=2026-10-07&sampai=2026-10-01", follow_redirects=True)
+    assert "Tanggal sampai tidak boleh sebelum tanggal dari" in r.get_data(as_text=True)
+    assert "Export Hasil Pengukuran" in client.get("/export").get_data(as_text=True)
+
+    siti = _login(app, "siti", "petugas123")
+    assert siti.get("/export/pengukuran?format=xlsx&pasien_id=2").status_code == 404
+    rows = list(load_workbook(BytesIO(siti.get("/export/pengukuran?format=xlsx").data)).active.iter_rows(min_row=5, values_only=True))
+    assert {row[2] for row in rows} == {"Budi"}
+    html = siti.get("/export").get_data(as_text=True)
+    assert "Budi" in html and "Wati" not in html

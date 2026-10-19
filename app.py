@@ -5,8 +5,10 @@ import sqlite3
 from datetime import date, datetime, timedelta
 
 import click
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from ekspor import baris_pengukuran, buat_pdf, buat_xlsx
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pengguna (
@@ -846,6 +848,73 @@ def create_app(test_config=None):
         db.commit()
         flash("Jadwal dihapus", "success")
         return redirect(safe_next(request.form.get("next"), url_for("pasien_detail", pasien_id=j["pasien_id"], tab="jadwal")))
+
+    # ---------- Export ----------
+    FORMAT_EKSPOR = {
+        "xlsx": (buat_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pdf": (buat_pdf, "application/pdf"),
+    }
+
+    def _pasien_terakses():
+        where, params = filter_pasien("p.id")
+        return get_db().execute(f"SELECT p.id, p.nama, p.no_rm FROM pasien p WHERE {where} ORDER BY p.nama", params).fetchall()
+
+    @app.route("/export")
+    def export():
+        return render_template(
+            "export.html", pasien=_pasien_terakses(),
+            f={"pasien_id": request.args.get("pasien_id", ""), "dari": request.args.get("dari", ""),
+               "sampai": request.args.get("sampai", "")},
+        )
+
+    @app.route("/export/pengukuran")
+    def export_pengukuran():
+        fmt = request.args.get("format")
+        if fmt not in FORMAT_EKSPOR:
+            abort(400)
+        pasien_id = parse_int(request.args.get("pasien_id"))
+        tanggal = {}
+        for k in ("dari", "sampai"):
+            v = request.args.get(k, "").strip()
+            try:
+                tanggal[k] = date.fromisoformat(v).isoformat() if v else None
+            except ValueError:
+                flash("Format tanggal tidak valid", "danger")
+                return redirect(url_for("export"))
+        if tanggal["dari"] and tanggal["sampai"] and tanggal["sampai"] < tanggal["dari"]:
+            flash("Tanggal sampai tidak boleh sebelum tanggal dari", "danger")
+            return redirect(url_for("export", **request.args.to_dict()))
+
+        where, params = filter_pasien("p.id")
+        sql = f"""SELECT m.*, p.nama AS nama_pasien, p.no_rm FROM pengukuran m
+                  JOIN pasien p ON p.id = m.pasien_id WHERE {where}"""
+        pasien = None
+        if pasien_id is not None:
+            pasien = get_pasien(pasien_id)
+            sql += " AND p.id = ?"
+            params = (*params, pasien_id)
+        if tanggal["dari"]:
+            sql += " AND date(m.waktu) >= ?"
+            params = (*params, tanggal["dari"])
+        if tanggal["sampai"]:
+            sql += " AND date(m.waktu) <= ?"
+            params = (*params, tanggal["sampai"])
+        sql += " ORDER BY p.nama, m.waktu"
+        rows = [baris_pengukuran(m, kategori_tensi, kategori_gula, JENIS_GULA) for m in get_db().execute(sql, params)]
+
+        periode = "semua tanggal"
+        if tanggal["dari"] or tanggal["sampai"]:
+            periode = f"{format_tgl(tanggal['dari']) if tanggal['dari'] else '...'} s/d " \
+                      f"{format_tgl(tanggal['sampai']) if tanggal['sampai'] else '...'}"
+        subjek = f"{pasien['nama']} (No. RM {pasien['no_rm'] or '-'})" if pasien else "Semua pasien"
+        keterangan = (f"Pasien: {subjek} | Periode: {periode} | Dicetak: "
+                      f"{datetime.now().strftime('%d-%m-%Y %H:%M')} oleh {g.user['nama'] or g.user['username']}")
+        buat, mimetype = FORMAT_EKSPOR[fmt]
+        nama = "".join(c if c.isalnum() else "_" for c in (pasien["nama"] if pasien else "semua")).strip("_") or "pasien"
+        return send_file(
+            buat(rows, "Laporan Hasil Pengukuran Pasien", keterangan), mimetype=mimetype, as_attachment=True,
+            download_name=f"pengukuran_{nama}_{date.today().isoformat()}.{fmt}",
+        )
 
     return app
 

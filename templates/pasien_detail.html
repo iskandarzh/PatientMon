@@ -34,7 +34,18 @@
   <div class="tab-pane fade {% if tab == 'pengukuran' %}show active{% endif %} p-3" id="tab-pengukuran">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h5 class="mb-0">Riwayat Tensi & Gula Darah</h5>
-      <a class="btn btn-primary btn-sm" href="{{ url_for('pengukuran_baru', pasien_id=pasien.id) }}"><i class="bi bi-plus-lg"></i> Input Pengukuran</a>
+      <div class="d-flex gap-2">
+        <div class="dropdown">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown"><i class="bi bi-download"></i> Export</button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><a class="dropdown-item" href="{{ url_for('export_pengukuran', pasien_id=pasien.id, format='xlsx') }}"><i class="bi bi-file-earmark-excel text-success"></i> Excel (.xlsx)</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('export_pengukuran', pasien_id=pasien.id, format='pdf') }}"><i class="bi bi-file-earmark-pdf text-danger"></i> PDF</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="{{ url_for('export', pasien_id=pasien.id) }}"><i class="bi bi-funnel"></i> Pilih rentang tanggal...</a></li>
+          </ul>
+        </div>
+        <a class="btn btn-primary btn-sm" href="{{ url_for('pengukuran_baru', pasien_id=pasien.id) }}"><i class="bi bi-plus-lg"></i> Input Pengukuran</a>
+      </div>
     </div>
     {% if pengukuran|length > 1 %}
     <div class="row g-3 mb-3">

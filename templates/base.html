@@ -22,6 +22,7 @@
       <ul class="navbar-nav me-auto">{% if g.user %}
         <li class="nav-item"><a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}">Dashboard</a></li>
         <li class="nav-item"><a class="nav-link {% if request.endpoint and request.endpoint.startswith('pasien') %}active{% endif %}" href="{{ url_for('pasien_list') }}">Pasien</a></li>
+        <li class="nav-item"><a class="nav-link {% if request.endpoint and request.endpoint.startswith('export') %}active{% endif %}" href="{{ url_for('export') }}"><i class="bi bi-download"></i> Export</a></li>
       {% endif %}</ul>
       {% if g.user %}
       {% if is_admin() %}<a class="btn btn-light btn-sm me-2" href="{{ url_for('pasien_baru') }}"><i class="bi bi-person-plus"></i> Pasien Baru</a>{% endif %}

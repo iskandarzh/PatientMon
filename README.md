@@ -8,6 +8,7 @@ Aplikasi web sederhana (Flask + SQLite) untuk:
 - **Jadwal pemberian obat** – buat jadwal otomatis berdasarkan rentang tanggal dan jam (mis. `08:00, 20:00`), lalu tandai *Diberikan* / *Dilewati*. Jadwal yang lewat waktu ditandai *Terlambat*.
 - **Dashboard** – jadwal obat semua pasien per tanggal dan pengukuran terbaru.
 - **Login** – semua halaman wajib login (username/password, password di-hash). Kelola pengguna & ganti password lewat menu akun.
+- **Export pengukuran** – menu *Export* (atau tombol Export di tab Pengukuran pasien) untuk mengunduh hasil pengukuran ke Excel (.xlsx) atau PDF, per pasien atau semua pasien, dengan filter rentang tanggal. Petugas hanya bisa mengekspor pasien yang ditugaskan kepadanya.
 - **Hak akses per pasien** – role *Admin* (semua pasien, tambah/hapus pasien, kelola pengguna & penugasan) dan *Petugas* (hanya pasien yang ditugaskan kepadanya).
 
 ## Menjalankan
