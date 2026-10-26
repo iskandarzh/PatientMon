@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Export Pengukuran{% endblock %}
+{% block content %}
+<div class="card mx-auto" style="max-width: 640px">
+  <div class="card-body">
+    <h4 class="mb-1"><i class="bi bi-download"></i> Export Hasil Pengukuran</h4>
+    <p class="text-muted">Unduh riwayat tensi, nadi, dan gula darah beserta kategorinya ke Excel atau PDF.</p>
+    <form method="get" action="{{ url_for('export_pengukuran') }}">
+      <div class="row g-3">
+        <div class="col-12"><label class="form-label">Pasien</label>
+          <select class="form-select" name="pasien_id">
+            <option value="">Semua pasien{% if not is_admin() %} yang ditugaskan kepada saya{% endif %}</option>
+            {% for p in pasien %}<option value="{{ p.id }}" {% if f.pasien_id == p.id|string %}selected{% endif %}>{{ p.nama }}{% if p.no_rm %} ({{ p.no_rm }}){% endif %}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-md-6"><label class="form-label">Dari tanggal</label><input type="date" class="form-control" name="dari" value="{{ f.dari }}"></div>
+        <div class="col-md-6"><label class="form-label">Sampai tanggal</label><input type="date" class="form-control" name="sampai" value="{{ f.sampai }}"></div>
+        <div class="col-12 form-text mt-1">Kosongkan tanggal untuk mengekspor semua pengukuran.</div>
+      </div>
+      <div class="mt-4 d-flex gap-2">
+        <button class="btn btn-success" name="format" value="xlsx"><i class="bi bi-file-earmark-excel"></i> Export Excel</button>
+        <button class="btn btn-danger" name="format" value="pdf"><i class="bi bi-file-earmark-pdf"></i> Export PDF</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

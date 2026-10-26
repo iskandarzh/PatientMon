@@ -5,8 +5,10 @@ import sqlite3
 from datetime import date, datetime, timedelta
 
 import click
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from ekspor import baris_pengukuran, buat_pdf, buat_xlsx
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pengguna (
@@ -14,6 +16,7 @@ CREATE TABLE IF NOT EXISTS pengguna (
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     nama TEXT,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'petugas',
     dibuat TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -25,6 +28,12 @@ CREATE TABLE IF NOT EXISTS pasien (
     jenis_kelamin TEXT,
     catatan TEXT,
     dibuat TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS pasien_pengguna (
+    pasien_id INTEGER NOT NULL REFERENCES pasien(id) ON DELETE CASCADE,
+    pengguna_id INTEGER NOT NULL REFERENCES pengguna(id) ON DELETE CASCADE,
+    PRIMARY KEY (pasien_id, pengguna_id)
 );
 
 CREATE TABLE IF NOT EXISTS pengukuran (
@@ -69,6 +78,7 @@ JENIS_GULA = {
 }
 RUTE = ["Oral", "Injeksi IV", "Injeksi IM", "Injeksi SC", "Topikal", "Inhalasi", "Sublingual", "Lainnya"]
 STATUS_JADWAL = {"terjadwal": "Terjadwal", "diberikan": "Diberikan", "dilewati": "Dilewati"}
+ROLE = {"admin": "Admin", "petugas": "Petugas"}
 
 
 def kategori_tensi(sis, dia):
@@ -129,6 +139,7 @@ def now_local():
 
 MIN_PASSWORD = 8
 PUBLIC_ENDPOINTS = {"login", "setup", "static"}
+ADMIN_ENDPOINTS = {"pasien_baru", "pasien_hapus", "pengguna", "pengguna_hapus", "pengguna_role"}
 
 
 def load_secret_key(instance_path):
@@ -180,7 +191,12 @@ def create_app(test_config=None):
             db.close()
 
     with app.app_context():
-        get_db().executescript(SCHEMA)
+        db = get_db()
+        kolom = {r["name"] for r in db.execute("PRAGMA table_info(pengguna)")}
+        if kolom and "role" not in kolom:
+            # Database lama: semua pengguna yang sudah ada dijadikan admin agar tidak ada yang terkunci.
+            db.execute("ALTER TABLE pengguna ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+        db.executescript(SCHEMA)
 
     # ---------- Autentikasi ----------
     def csrf_token():
@@ -209,7 +225,18 @@ def create_app(test_config=None):
             if jumlah_pengguna() == 0:
                 return redirect(url_for("setup"))
             return redirect(url_for("login", next=request.full_path if request.method == "GET" else None))
+        if request.endpoint in ADMIN_ENDPOINTS and not is_admin():
+            abort(403)
         return None
+
+    def is_admin():
+        return g.user is not None and g.user["role"] == "admin"
+
+    def filter_pasien(kolom):
+        """Klausa SQL yang membatasi pasien ke yang boleh diakses pengguna saat ini."""
+        if is_admin():
+            return "1=1", ()
+        return f"{kolom} IN (SELECT pasien_id FROM pasien_pengguna WHERE pengguna_id = ?)", (g.user["id"],)
 
     def mulai_sesi(user_id):
         session.clear()
@@ -222,7 +249,7 @@ def create_app(test_config=None):
             return redirect(url_for("login"))
         if request.method == "POST":
             try:
-                uid = buat_pengguna(request.form)
+                uid = buat_pengguna(request.form, "admin")
             except ValueError as e:
                 flash(str(e), "danger")
                 return render_template("setup.html", form=request.form)
@@ -254,18 +281,20 @@ def create_app(test_config=None):
         flash("Anda telah keluar", "success")
         return redirect(url_for("login"))
 
-    def buat_pengguna(form):
+    def buat_pengguna(form, role):
         username = form.get("username", "").strip()
         nama = form.get("nama", "").strip()
         password = form.get("password", "")
         if not username:
             raise ValueError("Username wajib diisi")
         validasi_password(password, form.get("konfirmasi", ""))
+        if role not in ROLE:
+            raise ValueError("Role tidak valid")
         db = get_db()
         try:
             cur = db.execute(
-                "INSERT INTO pengguna (username, nama, password_hash) VALUES (?, ?, ?)",
-                (username, nama, generate_password_hash(password)),
+                "INSERT INTO pengguna (username, nama, password_hash, role) VALUES (?, ?, ?, ?)",
+                (username, nama, generate_password_hash(password), role),
             )
         except sqlite3.IntegrityError:
             raise ValueError(f"Username '{username}' sudah dipakai")
@@ -278,13 +307,17 @@ def create_app(test_config=None):
         form = {}
         if request.method == "POST":
             try:
-                buat_pengguna(request.form)
+                buat_pengguna(request.form, request.form.get("role", "petugas"))
                 flash("Pengguna ditambahkan", "success")
                 return redirect(url_for("pengguna"))
             except ValueError as e:
                 flash(str(e), "danger")
                 form = request.form
-        users = db.execute("SELECT id, username, nama, dibuat FROM pengguna ORDER BY username").fetchall()
+        users = db.execute(
+            """SELECT u.id, u.username, u.nama, u.role, u.dibuat,
+                      (SELECT COUNT(*) FROM pasien_pengguna pp WHERE pp.pengguna_id = u.id) AS jumlah_pasien
+               FROM pengguna u ORDER BY u.username"""
+        ).fetchall()
         return render_template("pengguna.html", users=users, form=form)
 
     @app.route("/pengguna/<int:uid>/hapus", methods=["POST"])
@@ -296,6 +329,22 @@ def create_app(test_config=None):
         db.execute("DELETE FROM pengguna WHERE id = ?", (uid,))
         db.commit()
         flash("Pengguna dihapus", "success")
+        return redirect(url_for("pengguna"))
+
+    @app.route("/pengguna/<int:uid>/role", methods=["POST"])
+    def pengguna_role(uid):
+        role = request.form.get("role")
+        if role not in ROLE:
+            abort(400)
+        if uid == g.user["id"]:
+            flash("Tidak bisa mengubah role akun sendiri", "danger")
+            return redirect(url_for("pengguna"))
+        db = get_db()
+        db.execute("UPDATE pengguna SET role = ? WHERE id = ?", (role, uid))
+        if role == "admin":
+            db.execute("DELETE FROM pasien_pengguna WHERE pengguna_id = ?", (uid,))
+        db.commit()
+        flash(f"Role pengguna diubah menjadi {ROLE[role]}", "success")
         return redirect(url_for("pengguna"))
 
     @app.route("/akun/password", methods=["GET", "POST"])
@@ -332,8 +381,8 @@ def create_app(test_config=None):
             db.execute("UPDATE pengguna SET password_hash = ? WHERE username = ?", (hashed, username))
             click.echo(f"Password '{username}' diperbarui")
         else:
-            db.execute("INSERT INTO pengguna (username, password_hash) VALUES (?, ?)", (username, hashed))
-            click.echo(f"Pengguna '{username}' dibuat")
+            db.execute("INSERT INTO pengguna (username, password_hash, role) VALUES (?, ?, 'admin')", (username, hashed))
+            click.echo(f"Pengguna admin '{username}' dibuat")
         db.commit()
 
     app.jinja_env.globals.update(
@@ -343,6 +392,8 @@ def create_app(test_config=None):
         JENIS_GULA=JENIS_GULA,
         RUTE=RUTE,
         STATUS_JADWAL=STATUS_JADWAL,
+        ROLE=ROLE,
+        is_admin=is_admin,
     )
 
     @app.template_filter("tgl")
@@ -375,7 +426,8 @@ def create_app(test_config=None):
         return today.year - lahir.year - ((today.month, today.day) < (lahir.month, lahir.day))
 
     def get_pasien(pasien_id):
-        row = get_db().execute("SELECT * FROM pasien WHERE id = ?", (pasien_id,)).fetchone()
+        where, params = filter_pasien("id")
+        row = get_db().execute(f"SELECT * FROM pasien WHERE id = ? AND {where}", (pasien_id, *params)).fetchone()
         if row is None:
             abort(404)
         return row
@@ -384,12 +436,34 @@ def create_app(test_config=None):
         row = get_db().execute("SELECT * FROM obat WHERE id = ?", (obat_id,)).fetchone()
         if row is None:
             abort(404)
+        get_pasien(row["pasien_id"])
         return row
+
+    def daftar_petugas():
+        return get_db().execute(
+            "SELECT id, username, nama FROM pengguna WHERE role = 'petugas' ORDER BY username"
+        ).fetchall()
+
+    def petugas_pasien(pasien_id):
+        return {r[0] for r in get_db().execute(
+            "SELECT pengguna_id FROM pasien_pengguna WHERE pasien_id = ?", (pasien_id,)
+        )}
+
+    def simpan_penugasan(pasien_id):
+        valid = {u["id"] for u in daftar_petugas()}
+        dipilih = {int(v) for v in request.form.getlist("petugas") if v.isdigit()} & valid
+        db = get_db()
+        db.execute("DELETE FROM pasien_pengguna WHERE pasien_id = ?", (pasien_id,))
+        db.executemany(
+            "INSERT INTO pasien_pengguna (pasien_id, pengguna_id) VALUES (?, ?)",
+            [(pasien_id, uid) for uid in sorted(dipilih)],
+        )
 
     # ---------- Dashboard ----------
     @app.route("/")
     def dashboard():
         db = get_db()
+        where, params = filter_pasien("p.id")
         tanggal = request.args.get("tanggal") or date.today().isoformat()
         jadwal = db.execute(
             """
@@ -398,20 +472,22 @@ def create_app(test_config=None):
             FROM jadwal j
             JOIN obat o ON o.id = j.obat_id
             JOIN pasien p ON p.id = o.pasien_id
-            WHERE date(j.waktu) = ?
+            WHERE date(j.waktu) = ? AND {where}
             ORDER BY j.waktu, p.nama
-            """,
-            (tanggal,),
+            """.format(where=where),
+            (tanggal, *params),
         ).fetchall()
         pengukuran = db.execute(
             """
             SELECT m.*, p.nama AS nama_pasien FROM pengukuran m
             JOIN pasien p ON p.id = m.pasien_id
+            WHERE {where}
             ORDER BY m.waktu DESC LIMIT 10
-            """
+            """.format(where=where),
+            params,
         ).fetchall()
         stats = {
-            "pasien": db.execute("SELECT COUNT(*) FROM pasien").fetchone()[0],
+            "pasien": db.execute(f"SELECT COUNT(*) FROM pasien p WHERE {where}", params).fetchone()[0],
             "jadwal": len(jadwal),
             "diberikan": sum(1 for j in jadwal if j["status"] == "diberikan"),
             "terlambat": sum(1 for j in jadwal if j["status"] == "terjadwal" and j["waktu"] < now_local()),
@@ -431,12 +507,16 @@ def create_app(test_config=None):
               (SELECT MAX(waktu) FROM pengukuran m WHERE m.pasien_id = p.id) AS terakhir_ukur
             FROM pasien p
         """
-        params = ()
+        where, params = filter_pasien("p.id")
+        sql += f" WHERE {where}"
         if q:
-            sql += " WHERE p.nama LIKE ? OR p.no_rm LIKE ?"
-            params = (f"%{q}%", f"%{q}%")
+            sql += " AND (p.nama LIKE ? OR p.no_rm LIKE ?)"
+            params = (*params, f"%{q}%", f"%{q}%")
         sql += " ORDER BY p.nama"
         return render_template("pasien_list.html", pasien=get_db().execute(sql, params).fetchall(), q=q)
+
+    def _petugas_dipilih():
+        return {int(v) for v in request.form.getlist("petugas") if v.isdigit()}
 
     def _pasien_form_data():
         data = {k: request.form.get(k, "").strip() for k in ("no_rm", "nama", "tanggal_lahir", "jenis_kelamin", "catatan")}
@@ -451,16 +531,19 @@ def create_app(test_config=None):
                 d = _pasien_form_data()
             except ValueError as e:
                 flash(str(e), "danger")
-                return render_template("pasien_form.html", pasien=request.form)
+                return render_template(
+                    "pasien_form.html", pasien=request.form, petugas=daftar_petugas(), ditugaskan=_petugas_dipilih()
+                )
             db = get_db()
             cur = db.execute(
                 "INSERT INTO pasien (no_rm, nama, tanggal_lahir, jenis_kelamin, catatan) VALUES (?, ?, ?, ?, ?)",
                 (d["no_rm"], d["nama"], d["tanggal_lahir"], d["jenis_kelamin"], d["catatan"]),
             )
+            simpan_penugasan(cur.lastrowid)
             db.commit()
             flash("Pasien berhasil ditambahkan", "success")
             return redirect(url_for("pasien_detail", pasien_id=cur.lastrowid))
-        return render_template("pasien_form.html", pasien={})
+        return render_template("pasien_form.html", pasien={}, petugas=daftar_petugas(), ditugaskan=set())
 
     @app.route("/pasien/<int:pasien_id>/edit", methods=["GET", "POST"])
     def pasien_edit(pasien_id):
@@ -470,16 +553,23 @@ def create_app(test_config=None):
                 d = _pasien_form_data()
             except ValueError as e:
                 flash(str(e), "danger")
-                return render_template("pasien_form.html", pasien={**request.form.to_dict(), "id": pasien_id}, edit=True)
+                return render_template(
+                    "pasien_form.html", pasien={**request.form.to_dict(), "id": pasien_id}, edit=True,
+                    petugas=daftar_petugas(), ditugaskan=_petugas_dipilih(),
+                )
             db = get_db()
             db.execute(
                 "UPDATE pasien SET no_rm=?, nama=?, tanggal_lahir=?, jenis_kelamin=?, catatan=? WHERE id=?",
                 (d["no_rm"], d["nama"], d["tanggal_lahir"], d["jenis_kelamin"], d["catatan"], pasien_id),
             )
+            if is_admin():
+                simpan_penugasan(pasien_id)
             db.commit()
             flash("Data pasien diperbarui", "success")
             return redirect(url_for("pasien_detail", pasien_id=pasien_id))
-        return render_template("pasien_form.html", pasien=pasien, edit=True)
+        return render_template(
+            "pasien_form.html", pasien=pasien, edit=True, petugas=daftar_petugas(), ditugaskan=petugas_pasien(pasien_id)
+        )
 
     @app.route("/pasien/<int:pasien_id>/hapus", methods=["POST"])
     def pasien_hapus(pasien_id):
@@ -509,8 +599,13 @@ def create_app(test_config=None):
             (pasien_id,),
         ).fetchall()
         grafik = list(reversed(pengukuran))
+        petugas = db.execute(
+            """SELECT u.username, u.nama FROM pasien_pengguna pp JOIN pengguna u ON u.id = pp.pengguna_id
+               WHERE pp.pasien_id = ? ORDER BY u.username""",
+            (pasien_id,),
+        ).fetchall()
         return render_template(
-            "pasien_detail.html", pasien=pasien, pengukuran=pengukuran, obat=obat,
+            "pasien_detail.html", pasien=pasien, petugas=petugas, pengukuran=pengukuran, obat=obat,
             jadwal=jadwal, sekarang=now_local(), hari_ini=date.today().isoformat(),
             grafik={
                 "label": [m["waktu"].replace("T", " ") for m in grafik],
@@ -597,6 +692,7 @@ def create_app(test_config=None):
         m = db.execute("SELECT * FROM pengukuran WHERE id = ?", (mid,)).fetchone()
         if m is None:
             abort(404)
+        get_pasien(m["pasien_id"])
         db.execute("DELETE FROM pengukuran WHERE id = ?", (mid,))
         db.commit()
         flash("Pengukuran dihapus", "success")
@@ -727,6 +823,7 @@ def create_app(test_config=None):
         ).fetchone()
         if j is None:
             abort(404)
+        get_pasien(j["pasien_id"])
         status = request.form.get("status")
         if status not in STATUS_JADWAL:
             abort(400)
@@ -746,10 +843,78 @@ def create_app(test_config=None):
         ).fetchone()
         if j is None:
             abort(404)
+        get_pasien(j["pasien_id"])
         db.execute("DELETE FROM jadwal WHERE id = ?", (jid,))
         db.commit()
         flash("Jadwal dihapus", "success")
         return redirect(safe_next(request.form.get("next"), url_for("pasien_detail", pasien_id=j["pasien_id"], tab="jadwal")))
+
+    # ---------- Export ----------
+    FORMAT_EKSPOR = {
+        "xlsx": (buat_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pdf": (buat_pdf, "application/pdf"),
+    }
+
+    def _pasien_terakses():
+        where, params = filter_pasien("p.id")
+        return get_db().execute(f"SELECT p.id, p.nama, p.no_rm FROM pasien p WHERE {where} ORDER BY p.nama", params).fetchall()
+
+    @app.route("/export")
+    def export():
+        return render_template(
+            "export.html", pasien=_pasien_terakses(),
+            f={"pasien_id": request.args.get("pasien_id", ""), "dari": request.args.get("dari", ""),
+               "sampai": request.args.get("sampai", "")},
+        )
+
+    @app.route("/export/pengukuran")
+    def export_pengukuran():
+        fmt = request.args.get("format")
+        if fmt not in FORMAT_EKSPOR:
+            abort(400)
+        pasien_id = parse_int(request.args.get("pasien_id"))
+        tanggal = {}
+        for k in ("dari", "sampai"):
+            v = request.args.get(k, "").strip()
+            try:
+                tanggal[k] = date.fromisoformat(v).isoformat() if v else None
+            except ValueError:
+                flash("Format tanggal tidak valid", "danger")
+                return redirect(url_for("export"))
+        if tanggal["dari"] and tanggal["sampai"] and tanggal["sampai"] < tanggal["dari"]:
+            flash("Tanggal sampai tidak boleh sebelum tanggal dari", "danger")
+            return redirect(url_for("export", **request.args.to_dict()))
+
+        where, params = filter_pasien("p.id")
+        sql = f"""SELECT m.*, p.nama AS nama_pasien, p.no_rm FROM pengukuran m
+                  JOIN pasien p ON p.id = m.pasien_id WHERE {where}"""
+        pasien = None
+        if pasien_id is not None:
+            pasien = get_pasien(pasien_id)
+            sql += " AND p.id = ?"
+            params = (*params, pasien_id)
+        if tanggal["dari"]:
+            sql += " AND date(m.waktu) >= ?"
+            params = (*params, tanggal["dari"])
+        if tanggal["sampai"]:
+            sql += " AND date(m.waktu) <= ?"
+            params = (*params, tanggal["sampai"])
+        sql += " ORDER BY p.nama, m.waktu"
+        rows = [baris_pengukuran(m, kategori_tensi, kategori_gula, JENIS_GULA) for m in get_db().execute(sql, params)]
+
+        periode = "semua tanggal"
+        if tanggal["dari"] or tanggal["sampai"]:
+            periode = f"{format_tgl(tanggal['dari']) if tanggal['dari'] else '...'} s/d " \
+                      f"{format_tgl(tanggal['sampai']) if tanggal['sampai'] else '...'}"
+        subjek = f"{pasien['nama']} (No. RM {pasien['no_rm'] or '-'})" if pasien else "Semua pasien"
+        keterangan = (f"Pasien: {subjek} | Periode: {periode} | Dicetak: "
+                      f"{datetime.now().strftime('%d-%m-%Y %H:%M')} oleh {g.user['nama'] or g.user['username']}")
+        buat, mimetype = FORMAT_EKSPOR[fmt]
+        nama = "".join(c if c.isalnum() else "_" for c in (pasien["nama"] if pasien else "semua")).strip("_") or "pasien"
+        return send_file(
+            buat(rows, "Laporan Hasil Pengukuran Pasien", keterangan), mimetype=mimetype, as_attachment=True,
+            download_name=f"pengukuran_{nama}_{date.today().isoformat()}.{fmt}",
+        )
 
     return app
 

@@ -146,3 +146,126 @@ def test_cli_set_password(app):
     assert "dibuat" in r.output
     c = app.test_client()
     assert c.post("/login", data={"username": "admin", "password": "rahasia123"}).status_code == 302
+
+
+def _login(app, username, password):
+    c = app.test_client()
+    assert c.post("/login", data={"username": username, "password": password}).status_code == 302
+    return c
+
+
+def test_akses_pasien_per_petugas(client, app):
+    for u in ("siti", "rina"):
+        client.post("/pengguna", data={"username": u, "role": "petugas", "password": "petugas123", "konfirmasi": "petugas123"})
+    # siti = id 2, rina = id 3; admin (id 1) is ignored as an assignee
+    client.post("/pasien/baru", data={"nama": "Budi", "petugas": ["2", "1"]})
+    client.post("/pasien/baru", data={"nama": "Wati", "petugas": ["3"]})
+    client.post("/pasien/1/obat/baru", data={"nama": "Amlodipine", "dosis": "5"})
+    client.post("/pasien/2/obat/baru", data={"nama": "Metformin", "dosis": "500"})
+    client.post("/obat/2/jadwal/baru", data={"tanggal_mulai": "2026-10-05", "tanggal_selesai": "2026-10-05", "jam": "08:00"})
+    client.post("/pasien/2/pengukuran/baru", data={"waktu": "2026-10-05T08:00", "gula_darah": "120"})
+
+    siti = _login(app, "siti", "petugas123")
+    html = siti.get("/pasien").get_data(as_text=True)
+    assert "Budi" in html and "Wati" not in html
+    html = siti.get("/?tanggal=2026-10-05").get_data(as_text=True)
+    assert "Wati" not in html and "Metformin" not in html
+    assert siti.get("/pasien/1").status_code == 200
+    # every route touching another patient's data is 404
+    for url in ("/pasien/2", "/pasien/2/edit", "/pasien/2/obat/baru", "/pasien/2/pengukuran/baru",
+                "/obat/2/edit", "/obat/2/jadwal/baru", "/pengukuran/1/edit"):
+        assert siti.get(url).status_code == 404, url
+    for url, data in (("/pasien/2/edit", {"nama": "X"}), ("/obat/2/hapus", {}), ("/pengukuran/1/hapus", {}),
+                      ("/jadwal/1/status", {"status": "diberikan"}), ("/jadwal/1/hapus", {})):
+        assert siti.post(url, data=data).status_code == 404, url
+    # admin-only actions
+    for url in ("/pasien/baru", "/pengguna"):
+        assert siti.get(url).status_code == 403, url
+    assert siti.post("/pasien/1/hapus").status_code == 403
+    assert siti.post("/pengguna/3/role", data={"role": "admin"}).status_code == 403
+    # petugas can still manage an assigned patient, but not change its assignment
+    assert siti.post("/pasien/1/edit", data={"nama": "Budi S", "petugas": ["3"]}).status_code == 302
+    assert siti.post("/pasien/1/pengukuran/baru", data={"waktu": "2026-10-05T09:00", "sistolik": "120", "diastolik": "80"}).status_code == 302
+    assert _login(app, "rina", "petugas123").get("/pasien/1").status_code == 404
+
+    # admin sees everything and can reassign
+    assert "Wati" in client.get("/pasien").get_data(as_text=True)
+    client.post("/pasien/2/edit", data={"nama": "Wati", "petugas": ["2"]})
+    assert siti.get("/pasien/2").status_code == 200
+
+
+def test_ubah_role(client, app):
+    client.post("/pengguna", data={"username": "siti", "role": "petugas", "password": "petugas123", "konfirmasi": "petugas123"})
+    client.post("/pasien/baru", data={"nama": "Budi"})
+    siti = _login(app, "siti", "petugas123")
+    assert siti.get("/pasien/1").status_code == 404
+    client.post("/pengguna/2/role", data={"role": "admin"})
+    assert siti.get("/pasien/1").status_code == 200 and siti.get("/pengguna").status_code == 200
+    r = client.post("/pengguna/1/role", data={"role": "petugas"}, follow_redirects=True)
+    assert "Tidak bisa mengubah role akun sendiri" in r.get_data(as_text=True)
+
+
+def test_migrasi_pengguna_lama_jadi_admin(tmp_path):
+    import sqlite3
+    from werkzeug.security import generate_password_hash
+    path = tmp_path / "lama.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE pengguna (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            nama TEXT, password_hash TEXT NOT NULL, dibuat TEXT NOT NULL DEFAULT (datetime('now', 'localtime')));
+        CREATE TABLE pasien (id INTEGER PRIMARY KEY AUTOINCREMENT, no_rm TEXT, nama TEXT NOT NULL, tanggal_lahir TEXT,
+            jenis_kelamin TEXT, catatan TEXT, dibuat TEXT NOT NULL DEFAULT (datetime('now', 'localtime')));
+    """)
+    db.execute("INSERT INTO pengguna (username, password_hash) VALUES ('lama', ?)", (generate_password_hash("rahasia123"),))
+    db.execute("INSERT INTO pasien (nama) VALUES ('Budi')")
+    db.commit()
+    db.close()
+    app = create_app({"TESTING": True, "CSRF_ENABLED": False, "DATABASE": str(path)})
+    c = _login(app, "lama", "rahasia123")
+    assert "Budi" in c.get("/pasien").get_data(as_text=True)
+    assert c.get("/pengguna").status_code == 200
+    # new users created afterwards default to petugas
+    c.post("/pengguna", data={"username": "baru", "password": "rahasia123", "konfirmasi": "rahasia123"})
+    assert _login(app, "baru", "rahasia123").get("/pasien/1").status_code == 404
+
+
+def test_export_pengukuran(client, app):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    client.post("/pengguna", data={"username": "siti", "role": "petugas", "password": "petugas123", "konfirmasi": "petugas123"})
+    client.post("/pasien/baru", data={"nama": "Budi", "no_rm": "RM1", "petugas": ["2"]})
+    client.post("/pasien/baru", data={"nama": "Wati"})
+    client.post("/pasien/1/pengukuran/baru", data={"waktu": "2026-10-05T08:00", "sistolik": "150", "diastolik": "95",
+                                                   "gula_darah": "130", "jenis_gula": "puasa", "catatan": "=1+1"})
+    client.post("/pasien/1/pengukuran/baru", data={"waktu": "2026-10-07T08:00", "sistolik": "118", "diastolik": "76"})
+    client.post("/pasien/2/pengukuran/baru", data={"waktu": "2026-10-05T09:00", "gula_darah": "90"})
+
+    r = client.get("/export/pengukuran?format=xlsx")
+    assert r.status_code == 200 and r.headers["Content-Disposition"].endswith(".xlsx")
+    ws = load_workbook(BytesIO(r.data)).active
+    rows = [row for row in ws.iter_rows(min_row=5, values_only=True)]
+    assert [row[2] for row in rows] == ["Budi", "Budi", "Wati"]
+    assert rows[0][3:7] == (150, 95, None, "Hipertensi Tahap 2")
+    assert rows[0][9] == "Diabetes" and rows[0][10] == "=1+1"
+    assert ws.cell(row=5, column=11).data_type == "s"
+
+    r = client.get("/export/pengukuran?format=xlsx&pasien_id=1&dari=2026-10-06&sampai=2026-10-31")
+    rows = list(load_workbook(BytesIO(r.data)).active.iter_rows(min_row=5, values_only=True))
+    assert len(rows) == 1 and rows[0][0] == "2026-10-07 08:00"
+    assert "pengukuran_Budi_" in r.headers["Content-Disposition"]
+
+    r = client.get("/export/pengukuran?format=pdf&pasien_id=1")
+    assert r.status_code == 200 and r.mimetype == "application/pdf" and r.data.startswith(b"%PDF")
+    assert client.get("/export/pengukuran?format=csv").status_code == 400
+    r = client.get("/export/pengukuran?format=pdf&dari=2026-10-07&sampai=2026-10-01", follow_redirects=True)
+    assert "Tanggal sampai tidak boleh sebelum tanggal dari" in r.get_data(as_text=True)
+    assert "Export Hasil Pengukuran" in client.get("/export").get_data(as_text=True)
+
+    siti = _login(app, "siti", "petugas123")
+    assert siti.get("/export/pengukuran?format=xlsx&pasien_id=2").status_code == 404
+    rows = list(load_workbook(BytesIO(siti.get("/export/pengukuran?format=xlsx").data)).active.iter_rows(min_row=5, values_only=True))
+    assert {row[2] for row in rows} == {"Budi"}
+    html = siti.get("/export").get_data(as_text=True)
+    assert "Budi" in html and "Wati" not in html
